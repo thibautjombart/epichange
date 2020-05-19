@@ -300,23 +300,46 @@ We simulate the following datasets, all covering 30 days of data and using Poiss
 
 ```{r simulate_data}
 
-dates <- 1:30
+## Note: this is a quick and dirty simulator only used for a proof of concept
 
-sim_stationary <- rpois(n = 30, lambda = 100)
+#' @param n_days number of days to run simulations for
+#' @param change_at day at which to change (increase / decrease)
+#' @param n_start initial number of cases to start with
+#' @param r_increase daily growth rate for increase
+#' @param r_decrease daily growth rate for decrease
 
-sim_stationary_increase <- c(rpois(n = 25, lambda = 100),
-                             rpois(n = 5, lambda = 100 * exp(0.1 * 1:5)))
+simulate_data <- function(n_days = 30, change_at = 25, n_start = 200,
+                          r_increase = 0.1, r_decrease = -0.05) {
+  
+  dates <- seq_len(n_days)
+  n_days_change <- max(1L, n_days - change_at)
+  days_change <- seq_len(n_days_change)
+  
+  sim_stationary <- rpois(n = n_days, lambda = n_start)
 
-sim_decrease_increase <- rpois(n = 25, lambda = 100 * exp(-0.05 * 0:24))
-sim_decrease_increase <- c(sim_decrease_increase,
-                           rpois(n = 5,
-                                 lambda = sim_decrease_increase[25] * exp(.2 * 1:5)))
-                             
-sim <- data.frame(dates = dates,
-                  stationary = sim_stationary,
-                  stationary_increase = sim_stationary_increase,
-                  decrease_increase = sim_decrease_increase)
+  sim_stationary_increase <- rpois(n = change_at, lambda = n_start)
+  lambda_increase <- tail(sim_stationary_increase, 1L) * exp(r_increase * days_change)
+  sim_stationary_increase <- c(sim_stationary_increase,
+                               rpois(n = n_days_change,
+                                     lambda = lambda_increase))
 
+  days_decrease <- seq_len(change_at) - 1
+  lambda_decrease <- n_start * exp(r_decrease * days_decrease)
+  sim_decrease_increase <- rpois(n = change_at, lambda = lambda_decrease)
+  lambda_increase <- tail(sim_decrease_increase, 1L) * exp(r_increase * days_change)
+  sim_decrease_increase <- c(sim_decrease_increase,
+                             rpois(n = n_days_change,
+                                   lambda = lambda_increase))
+  
+  data.frame(dates = dates,
+             stationary = sim_stationary,
+             stationary_increase = sim_stationary_increase,
+             decrease_increase = sim_decrease_increase)
+
+}
+
+
+sim <- simulate_data()
 sim_long <- sim %>%
   pivot_longer(-1, names_to = "simulation", values_to = "cases")
 
