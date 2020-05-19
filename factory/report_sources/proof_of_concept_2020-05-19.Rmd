@@ -339,11 +339,11 @@ simulate_data <- function(n_days = 30, change_at = 25, n_start = 200,
 }
 
 
-sim <- simulate_data()
-sim_long <- sim %>%
+x <- simulate_data()
+x_long <- x %>%
   pivot_longer(-1, names_to = "simulation", values_to = "cases")
 
-ggplot(sim_long, aes(x = dates, y = cases, color = simulation)) +
+ggplot(x_long, aes(x = dates, y = cases, color = simulation)) +
   geom_point() +
   geom_line() +
   scale_color_viridis_d(end = 0.8) +
@@ -358,6 +358,70 @@ ggplot(sim_long, aes(x = dates, y = cases, color = simulation)) +
 
 
 
+## Approach 1: projection and p-value
+
+In this approach, we:
+
+1. a priori divide the data as:
+    * first *n - k* points for fitting a model
+	* last *k* points for which we assess if they correspond to a trend change
+in incidence 
+
+2. fit the model on the first *n - k* points (Poisson GLM by default)
+
+3. derive a large number of projections from the a model for the last *k* points
+
+4. find a metric measuring how far from the projections each of the last *k* points is
+
+
+```{r approach_1}
+
+
+#' Fit quasipoisson glm to data and forecast for remaining data points
+#' 
+#' 1. get value of lambda from its distribution
+#' 2. get counts from the lambda
+#'
+#' @param data a `data.frame` with 2 columns: `dates`, and `counts`, in this order
+#' @param k the number of last days to be left off the fitting
+#' @param n_sim the number of simulations to perform
+#'
+#' @return a list with two components: i) a list with `k` component, each
+#'   containing forecasts for the corresponding day (from the day immediately
+#'   after the last day used for fitting to the last) ii) a `data.frame` of the
+#'   data for the last `k` days
+
+fit_and_forecast <- function(data, k = 1, n_sim = 1000) {
+
+  n_fit <- max(x$dates) - k
+  data_fit <- dplyr::filter(data, dates <= n_fit)
+  data_test <- dplyr::filter(data, dates > n_fit)
+  mod <- glm(counts ~ dates, family = "quasipoisson", data = data_fit)
+
+  days_predict <- seq(n_fit + 1, length = k, by = 1L)
+  coefs <- summary(mod)$coefficients
+
+  intercept <- rnorm(n_sim, mean = coefs[1, 1], sd = coefs[1, 2])
+  slope <- rnorm(n_sim, mean = coefs[2, 1], sd = coefs[2, 2])
+  pred <- lapply(days_predict,
+                 function(t)
+                   rpois(n = n_sim, lambda = exp(intercept + slope * t))
+                 )
+  names(pred) <- days_predict
+
+  ## return a list of predictions, and the observed data for these days
+  list(pred = pred,
+       obs = data_test)
+  
+}
+
+
+pred_stationary <- x %>%
+  select(dates, counts = stationary) %>%
+  fit_and_forecast(k = 5)
+
+
+```
 
 
 
