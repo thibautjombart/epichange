@@ -3,8 +3,8 @@
 
 This repository contains a
 [reportfactory](https://github.com/reconhub/reportfactory) automating the
-production of routine results for the analysis of potential COVID-19 symptoms
-reported through England **NHS Pathways**.
+production of research reports aiming to detect changes in COVID-19 incidence
+using potential COVID-19 symptoms reported through England **NHS Pathways**.
 
 The **NHS Pathways** dataset describes potential COVID-19 symptoms reported in 
 England through 111 and 999 calls, and 111 online reports. It is updated 
@@ -34,7 +34,65 @@ reportfactory::install_deps()
 
 
 
-## Loading the latest extracted datasets
+
+<br>
+<img src="data/images/line_bubbles.png" alt="line">
+
+
+## Updating data and analyses
+
+The simplest way to update data and analyses is to run:
+
+```r
+
+reportfactory::update_reports(clean_report_sources = TRUE)
+
+```
+
+This will compile all reports in `report_sources/` in alphanumeric order, and
+save all outputs to `report_outputs/`; actions include:
+
+* download publicly available NHS pathways data
+* process this data, save it in a `rds`
+* create an `import_pathways()` function in `scripts/` which will automatically
+  read the latest version of the data
+* run all analyses based on the new data
+* save all outputs in `report_outputs/`
+
+
+See other sections for specific actions.
+
+
+
+
+
+<br>
+<img src="data/images/line_bubbles.png" alt="line">
+
+
+## Specific actions
+
+### Compiling the data cleaning report
+
+Data can be updated using:
+
+```r
+
+reportfactory::compile_report("clean_latest_pathways_2020-05-13.Rmd",
+                              clean_report_sources = TRUE)
+
+```
+
+This will compile a data cleaning report which will: 
+
+* download publicly available NHS pathways data
+* process this data, save it in a `rds`
+* create an `import_pathways()` function in `scripts/` which will automatically
+  read the latest version of the data
+* save the html output of the report in `report_outputs/`
+
+
+
 
 ### Loading the latest extracted NHS Pathways dataset
 
@@ -53,67 +111,9 @@ pathways
 
 ```
 
-Alternatively, the path to the latest extracted **NHS Pathways** data is stored
-in `current_pathways`, and the file can be read directly using `readRDS()` or
-`rio::import()`:
 
 
-```r
-## load the global factory scripts
-reportfactory::rfh_load_scripts()
-
-## use the path to the latest extracted NHS Pathways dataset to read the file
-current_pathways
-
-pathways <- readRDS(current_pathways)
-pathways
-
-pathways <- rio::import(current_pathways)
-pathways
-
-```
-
-### Loading other datasets
-
-The repository also contains COVID-19 daily **deaths** in England, by NHS region,
-extracted from the [NHS website](https://www.england.nhs.uk/statistics/statistical-work-areas/covid-19-daily-deaths/).
-
-As with **NHS Pathways** data, the **deaths** data can be extracted using a helper function,
-or read directly using `readRDS()` or `rio::import()`
-
-```r
-## load the global factory scripts
-reportfactory::rfh_load_scripts()
-
-## load the latest extracted deaths dataset
-deaths <- import_deaths()
-deaths
-
-## use the path to the latest extracted deaths dataset to read the file
-current_deaths
-
-deaths <- readRDS(current_deaths)
-deaths
-
-deaths <- rio::import(current_deaths)
-deaths
-
-```
-
-
-
-<br>
-<img src="data/images/line_bubbles.png" alt="line">
-
-
-
-## Compiling the analysis
-
-### Generating the figures 
-
-The initial analysis can be locally compiled using the
-`nhs_pathways_analysis_2020-05-13.Rmd` report in the `report_sources/`
-folder. 
+### Compiling the analysis
 
 ```r
 reportfactory::compile_report("nhs_pathways_analysis_2020-05-13.Rmd")
