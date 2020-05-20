@@ -18,13 +18,12 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE,
                       collapse = TRUE,
-                      dpi = 300,
+                      dpi = 80,
                       fig.height = 4,
                       fig.width = 8,
                       warning = FALSE,
                       message = FALSE,
-                      fig.path = "figures/nhs_paths/",
-                      dev = c("pdf", "png"))
+                      dev = "png")
 ```
 
 
@@ -279,7 +278,7 @@ age.pal <- viridis::viridis(3,begin = 0.1, end = 0.7)
 <!-- ======================================================== -->
 <!-- ======================================================== -->
 
-# Proof of concept {.tabset .tabset-fade .tabset-pills}
+# Simulated data {.tabset .tabset-fade .tabset-pills}
 
 ## Outline
 
@@ -288,7 +287,7 @@ detecting changes in underlying rates of case incidence.
 
 
 
-## Simulated data
+## Simulator
 
 We simulate the following datasets, all covering 30 days of data and using Poisson distributions:
 
@@ -299,7 +298,7 @@ We simulate the following datasets, all covering 30 days of data and using Poiss
    a start at 50 for 25 days, followed by an exponential increase (*r* = 0.2) from day 26
    onwards
 
-```{r simulate_data}
+```{r simulator}
 
 ## Note: this is a quick and dirty simulator only used for a proof of concept
 
@@ -309,8 +308,8 @@ We simulate the following datasets, all covering 30 days of data and using Poiss
 #' @param r_increase daily growth rate for increase
 #' @param r_decrease daily growth rate for decrease
 
-simulate_data <- function(n_days = 30, change_at = 25, n_start = 200,
-                          r_increase = 0.1, r_decrease = -0.05) {
+simulate_data <- function(n_days = 30, change_at = 25, n_start = 300,
+                          r_increase = 0.1, r_decrease = -0.075) {
   
   dates <- seq_len(n_days)
   n_days_change <- max(1L, n_days - change_at)
@@ -340,6 +339,14 @@ simulate_data <- function(n_days = 30, change_at = 25, n_start = 200,
 }
 
 
+```
+
+
+
+## Simulated data
+
+```{r simulated_data}
+
 sim <- simulate_data()
 sim_long <- sim %>%
   pivot_longer(-1, names_to = "simulation", values_to = "cases")
@@ -359,7 +366,14 @@ ggplot(sim_long, aes(x = dates, y = cases, color = simulation)) +
 
 
 
-## Approach 1 implementation: model and deviations
+
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Using outlier metrics {.tabset .tabset-fade .tabset-pills}
+
+## Implementation
 
 In this approach, we:
 
@@ -427,7 +441,7 @@ fit_and_forecast <- function(dates, counts, k = 1, n_sim = 1000) {
 ## i) fits a model and derives predictions
 ## ii) calculates outlier stats for each data point
 
-get_stats <- function(dates, counts, k = 1, n_sim = 1000, C = 1.5) {
+get_stats <- function(dates, counts, k = 1, n_sim = 1000, C = 2) {
   
   ## OUTLIER STATS
   ## Note: these are custom stats considered for the current problem; more are
@@ -534,9 +548,9 @@ get_stats <- function(dates, counts, k = 1, n_sim = 1000, C = 1.5) {
 
 
 
-## Approach 1: results
+## Results: stationary
 
-```{r results}
+```{r results_stationary}
 
 ## stationary
 
@@ -547,54 +561,73 @@ res_stationary_long_stats <- res_stationary %>%
   pivot_longer(-(1:2), names_to = "metric", values_to = "stat") %>%
   mutate(metric = gsub("stat_", "", metric))
 
-res_stationary_long_outliers <- res_stationary %>%
-  select(1:2, contains("outlier")) %>%
-  pivot_longer(-(1:2), names_to = "metric", values_to = "outlier") %>%
-  mutate(metric = gsub("outlier_", "", metric))
+## res_stationary_long_outliers <- res_stationary %>%
+##   select(1:2, contains("outlier")) %>%
+##   pivot_longer(-(1:2), names_to = "metric", values_to = "outlier") %>%
+##   mutate(metric = gsub("outlier_", "", metric))
 
-res_stationary_long <- full_join(res_stationary_long_stats,
-                                 res_stationary_long_outliers)
+## res_stationary_long <- full_join(res_stationary_long_stats,
+##                                  res_stationary_long_outliers)
 
-res_stationary_long %>%
-  ggplot(aes(x = dates, y = stat, color = outlier)) +
+res_stationary_long_stats %>%
+  ggplot(aes(x = dates, y = stat, color = metric)) +
   facet_wrap( ~ metric, scales = "free") +
   geom_vline(xintercept = 25, linetype = 2) +
   theme_bw() +
   large_txt +
   geom_point() +
-  geom_line()
+  geom_line() +
+  guides(color = FALSE)
+
+```
 
 
-## stationary_increase
 
-res_stationary_increase <-  get_stats(sim$dates, sim$stationary_increase)
-res_stationary_increase_long <- res_stationary_increase %>%
-  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
 
-res_stationary_increase_long %>%
-  ggplot(aes(x = dates, y = value, color = metric)) +
+## Results: stationary + increase
+
+```{r}
+
+res_stationary_increase <- get_stats(sim$dates, sim$stationary_increase)
+
+res_stationary_increase_long_stats <- res_stationary_increase %>%
+  select(1:2, contains("stat")) %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "stat") %>%
+  mutate(metric = gsub("stat_", "", metric))
+
+res_stationary_increase_long_stats %>%
+  ggplot(aes(x = dates, y = stat, color = metric)) +
   facet_wrap( ~ metric, scales = "free") +
   geom_vline(xintercept = 25, linetype = 2) +
   theme_bw() +
   large_txt +
   geom_point() +
-  geom_line()
+  geom_line() +
+  guides(color = FALSE)
+ 
+```
 
 
-## decrease_increase
+## Results: decrease + increase
 
-res_decrease_increase <-  get_stats(sim$dates, sim$decrease_increase)
-res_decrease_increase_long <- res_decrease_increase %>%
-  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
+```{r}
 
-res_decrease_increase_long %>%
-  ggplot(aes(x = dates, y = value, color = metric)) +
+res_decrease_increase <- get_stats(sim$dates, sim$decrease_increase)
+
+res_decrease_increase_long_stats <- res_decrease_increase %>%
+  select(1:2, contains("stat")) %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "stat") %>%
+  mutate(metric = gsub("stat_", "", metric))
+
+res_decrease_increase_long_stats %>%
+  ggplot(aes(x = dates, y = stat, color = metric)) +
   facet_wrap( ~ metric, scales = "free") +
   geom_vline(xintercept = 25, linetype = 2) +
   theme_bw() +
   large_txt +
   geom_point() +
-  geom_line()
+  geom_line() +
+  guides(color = FALSE)
 
 ```
 
@@ -602,18 +635,41 @@ res_decrease_increase_long %>%
 
 
 
-## Using AnomalyDetection
 
 
-```{r AnomalyDetection}
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Using Seasonal Hybrid ESD {.tabset .tabset-fade .tabset-pills}
+
+## Results: stationary
+
+```{r }
 
 AnomalyDetectionVec(sim$stationary, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
-AnomalyDetectionVec(sim$stationary_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
-AnomalyDetectionVec(sim$decrease_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
-
 
 ```
 
+
+
+## Results: stationary
+
+```{r }
+
+AnomalyDetectionVec(sim$stationary_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
+
+```
+
+
+
+## Results: decrease + increase
+
+```{r }
+
+AnomalyDetectionVec(sim$decrease_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
+
+```
 
 
 
