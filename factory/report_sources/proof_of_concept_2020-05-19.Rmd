@@ -1,6 +1,6 @@
 ---
 title: "Early detection of changes in COVID-19 incidence using NHS pathways data"
-author: "Thibaut Jombart, ... for CMMID"
+author: "Thibaut Jombart, Emily Nightingale, Quentin Leclerc, Sam Abbott, ... for CMMID"
 date: "`r format(Sys.time(), '%A %d %B %Y')`"
 output:
   html_document:
@@ -393,7 +393,9 @@ in incidence
 
 fit_and_forecast <- function(data, k = 1, n_sim = 1000) {
 
-  n_fit <- max(x$dates) - k
+  n <- max(x$dates)
+  n_fit <- n - k
+  days <- seq_len(nrow(x))
   data_fit <- dplyr::filter(data, dates <= n_fit)
   data_test <- dplyr::filter(data, dates > n_fit)
   mod <- glm(counts ~ dates, family = "quasipoisson", data = data_fit)
@@ -403,15 +405,15 @@ fit_and_forecast <- function(data, k = 1, n_sim = 1000) {
 
   intercept <- rnorm(n_sim, mean = coefs[1, 1], sd = coefs[1, 2])
   slope <- rnorm(n_sim, mean = coefs[2, 1], sd = coefs[2, 2])
-  pred <- lapply(days_predict,
+  pred <- lapply(days,
                  function(t)
                    rpois(n = n_sim, lambda = exp(intercept + slope * t))
                  )
-  names(pred) <- days_predict
+  names(pred) <- days
 
   ## return a list of predictions, and the observed data for these days
   list(pred = pred,
-       obs = data_test)
+       obs = data)
   
 }
 
@@ -420,6 +422,37 @@ pred_stationary <- x %>%
   select(dates, counts = stationary) %>%
   fit_and_forecast(k = 5)
 
+
+## OUTLIER STATS
+
+## Note: these are custom stats considered for the current problem; more are
+## listed on https://en.wikipedia.org/wiki/Outlier; several make parametric
+## asumptions
+
+## 'Fringe' index (made-up name)
+##
+## Compares the value of an observation to a reference empirical distribution;
+## it has value:
+## - 0 when an observation is exactly the median of the empirical distribution
+## - 1 when it is outside the range of the distribution
+## - intermediate values increase with the proportion of the distribution less
+##   'extreme' than the observation (p(sim < obs) if (obs > median), and p(sim >
+##   obs) if (obs < median)
+
+get_fringe <- function(obs, sim) {
+  2 * abs(mean(obs > sim, na.rm = TRUE) - 0.5)
+}
+
+
+## 'IQRD' index (also made-up)
+##
+## Stands for Inter-Quartile Range Distance. This index measures the absolute
+## distance from the median in IQR units; in other words, how many IQR away from
+## the median is the observation?
+
+get_iqrd <- function(obs, sim) {
+  abs(obs - median(sim, na.rm = TRUE)) / IQR(sim, na.rm = TRUE)
+}
 
 ```
 
