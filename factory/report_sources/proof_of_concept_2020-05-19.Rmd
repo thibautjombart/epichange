@@ -274,6 +274,7 @@ age.pal <- viridis::viridis(3,begin = 0.1, end = 0.7)
 
 
 
+
 <!-- ======================================================== -->
 <!-- ======================================================== -->
 <!-- ======================================================== -->
@@ -339,11 +340,11 @@ simulate_data <- function(n_days = 30, change_at = 25, n_start = 200,
 }
 
 
-x <- simulate_data()
-x_long <- x %>%
+sim <- simulate_data()
+sim_long <- sim %>%
   pivot_longer(-1, names_to = "simulation", values_to = "cases")
 
-ggplot(x_long, aes(x = dates, y = cases, color = simulation)) +
+ggplot(sim_long, aes(x = dates, y = cases, color = simulation)) +
   geom_point() +
   geom_line() +
   scale_color_viridis_d(end = 0.8) +
@@ -358,7 +359,7 @@ ggplot(x_long, aes(x = dates, y = cases, color = simulation)) +
 
 
 
-## Approach 1: projection and p-value
+## Approach 1 implementation: model and deviations
 
 In this approach, we:
 
@@ -369,20 +370,20 @@ in incidence
 
 2. fit the model on the first *n - k* points (Poisson GLM by default)
 
-3. derive a large number of projections from the a model for the last *k* points
+3. derive a large number of projections from the a model for the different days
 
-4. find a metric measuring how far from the projections each of the last *k* points is
+4. calculate several metrics measuring how far from the projections each data point is
 
 
 ```{r approach_1}
-
 
 #' Fit quasipoisson glm to data and forecast for remaining data points
 #' 
 #' 1. get value of lambda from its distribution
 #' 2. get counts from the lambda
 #'
-#' @param data a `data.frame` with 2 columns: `dates`, and `counts`, in this order
+#' @param dates a vector of dates
+#' @param counts an `integer` vector of daily incidence 
 #' @param k the number of last days to be left off the fitting
 #' @param n_sim the number of simulations to perform
 #'
@@ -391,13 +392,16 @@ in incidence
 #'   after the last day used for fitting to the last) ii) a `data.frame` of the
 #'   data for the last `k` days
 
-fit_and_forecast <- function(data, k = 1, n_sim = 1000) {
+fit_and_forecast <- function(dates, counts, k = 1, n_sim = 1000) {
 
-  n <- max(x$dates)
+  n <- max(dates, na.rm = TRUE)
   n_fit <- n - k
-  days <- seq_len(nrow(x))
+  days <- seq_along(dates)
+  
+  data <- data.frame(dates = dates, counts = counts)
   data_fit <- dplyr::filter(data, dates <= n_fit)
   data_test <- dplyr::filter(data, dates > n_fit)
+
   mod <- glm(counts ~ dates, family = "quasipoisson", data = data_fit)
 
   days_predict <- seq(n_fit + 1, length = k, by = 1L)
@@ -418,43 +422,181 @@ fit_and_forecast <- function(data, k = 1, n_sim = 1000) {
 }
 
 
-pred_stationary <- x %>%
-  select(dates, counts = stationary) %>%
-  fit_and_forecast(k = 5)
+
+## wrapper for all the above:
+## i) fits a model and derives predictions
+## ii) calculates outlier stats for each data point
+
+get_stats <- function(dates, counts, k = 1, n_sim = 1000) {
+  
+  ## OUTLIER STATS
+  ## Note: these are custom stats considered for the current problem; more are
+  ## listed on https://en.wikipedia.org/wiki/Outlier; several make parametric
+  ## asumptions
 
 
-## OUTLIER STATS
+  ## Standardised residual
+  ## 
+  ## Note that the prediction is approximated as the mean of the empirical
+  ## distribution. We report the absolute value of the standardised residual.
 
-## Note: these are custom stats considered for the current problem; more are
-## listed on https://en.wikipedia.org/wiki/Outlier; several make parametric
-## asumptions
+  get_resid <- function(obs, sim) {
+    abs(obs - mean(sim, na.rm = TRUE)) / sd(sim, na.rm = TRUE)
+  }
 
-## 'Fringe' index (made-up name)
-##
-## Compares the value of an observation to a reference empirical distribution;
-## it has value:
-## - 0 when an observation is exactly the median of the empirical distribution
-## - 1 when it is outside the range of the distribution
-## - intermediate values increase with the proportion of the distribution less
-##   'extreme' than the observation (p(sim < obs) if (obs > median), and p(sim >
-##   obs) if (obs < median)
+  ## 'Fringe' index (made-up name)
+  ##
+  ## Compares the value of an observation to a reference empirical distribution;
+  ## it has value:
+  ## - 0 when an observation is exactly the median of the empirical distribution
+  ## - 1 when it is outside the range of the distribution
+  ## - intermediate values increase with the proportion of the distribution less
+  ##   'extreme' than the observation (p(sim < obs) if (obs > median), and p(sim >
+  ##   obs) if (obs < median)
 
-get_fringe <- function(obs, sim) {
-  2 * abs(mean(obs > sim, na.rm = TRUE) - 0.5)
+  get_fringe <- function(obs, sim) {
+    2 * abs(mean(obs > sim, na.rm = TRUE) - 0.5)
+  }
+
+
+  ## 'IQRD' index (also made-up)
+  ##
+  ## Stands for Inter-Quartile Range Distance. This index measures the absolute
+  ## distance from the median in IQR units; in other words, how many IQR away from
+  ## the median is the observation?
+
+  get_iqrd <- function(obs, sim) {
+    abs(obs - median(sim, na.rm = TRUE)) / IQR(sim, na.rm = TRUE)
+  }
+
+
+  ## MAD deviation
+  ##
+  ## This one already exists and relies on the Median Absolute Deviation (MAD)
+  ## to measure existing variation in the data.
+
+  get_mad <- function(obs, sim) {
+    abs(obs - median(sim, na.rm = TRUE)) / mad(sim, na.rm = TRUE)
+  }
+
+
+  ## Get model results, and apply statistics to them
+  res <- fit_and_forecast(dates, counts, k = k, n_sim = n_sim)
+
+  n <- length(dates)
+  res_resid <- numeric(n)
+  res_fringe <- numeric(n)
+  res_iqrd <- numeric(n)
+
+  ## calculate the different statistics
+  for (i in seq_len(n)) {
+    res_resid[i] <- get_resid(obs = res$obs$counts[i], sim = res$pred[[i]])
+    res_fringe[i] <- get_fringe(obs = res$obs$counts[i], sim = res$pred[[i]])
+    res_iqrd[i] <- get_iqrd(obs = res$obs$counts[i], sim = res$pred[[i]])
+    res_mad[i] <- get_mad(obs = res$obs$counts[i], sim = res$pred[[i]])
+  }
+
+
+  ## average metric (mean of other metrics after rescaling on 0-1)
+  rescale <- function(x) (x - min(x, na.rm = TRUE)) / max(x, na.rm = TRUE)
+
+  res_combined <- (rescale(res_resid) +
+    rescale(res_fringe) +
+    rescale(res_iqrd)) / 3
+  
+  cbind.data.frame(dates = dates,
+                   counts = counts,
+                   resid = res_resid,
+                   fringe = res_fringe,
+                   iqrd = res_iqrd,
+                   combined = res_combined)
 }
 
-
-## 'IQRD' index (also made-up)
-##
-## Stands for Inter-Quartile Range Distance. This index measures the absolute
-## distance from the median in IQR units; in other words, how many IQR away from
-## the median is the observation?
-
-get_iqrd <- function(obs, sim) {
-  abs(obs - median(sim, na.rm = TRUE)) / IQR(sim, na.rm = TRUE)
-}
 
 ```
+
+
+
+
+## Approach 1: results
+
+```{r results}
+
+## stationary
+
+res_stationary <-  get_stats(sim$dates, sim$stationary)
+res_stationary_long <- res_stationary %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
+
+res_stationary_long %>%
+  ggplot(aes(x = dates, y = value, color = metric)) +
+  facet_wrap( ~ metric, scales = "free") +
+  geom_vline(xintercept = 25, linetype = 2) +
+  theme_bw() +
+  large_txt +
+  geom_point() +
+  geom_line()
+
+
+## stationary_increase
+
+res_stationary_increase <-  get_stats(sim$dates, sim$stationary_increase)
+res_stationary_increase_long <- res_stationary_increase %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
+
+res_stationary_increase_long %>%
+  ggplot(aes(x = dates, y = value, color = metric)) +
+  facet_wrap( ~ metric, scales = "free") +
+  geom_vline(xintercept = 25, linetype = 2) +
+  theme_bw() +
+  large_txt +
+  geom_point() +
+  geom_line()
+
+
+## decrease_increase
+
+res_decrease_increase <-  get_stats(sim$dates, sim$decrease_increase)
+res_decrease_increase_long <- res_decrease_increase %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
+
+res_decrease_increase_long %>%
+  ggplot(aes(x = dates, y = value, color = metric)) +
+  facet_wrap( ~ metric, scales = "free") +
+  geom_vline(xintercept = 25, linetype = 2) +
+  theme_bw() +
+  large_txt +
+  geom_point() +
+  geom_line()
+
+```
+
+
+
+
+
+## Using AnomalyDetection
+
+
+```{r AnomalyDetection}
+
+```
+
+
+
+
+## Other approaches
+
+* a nice overview of R packages for [changepoint analysis](https://lindeloev.github.io/mcp/articles/packages.html)
+
+* [GUI](https://blog.exploratory.io/introduction-to-anomaly-detection-in-r-with-exploratory-a0507d40385d)
+  for anomaly detection amongst other things
+
+* Package [AnomalyDetection](https://github.com/twitter/AnomalyDetection)
+  implementing the Seasonal Hybrid ESD (S-H-ESD) algorithm developed by twitter
+
+
+
 
 
 
