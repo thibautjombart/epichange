@@ -427,7 +427,7 @@ fit_and_forecast <- function(dates, counts, k = 1, n_sim = 1000) {
 ## i) fits a model and derives predictions
 ## ii) calculates outlier stats for each data point
 
-get_stats <- function(dates, counts, k = 1, n_sim = 1000) {
+get_stats <- function(dates, counts, k = 1, n_sim = 1000, C = 1.5) {
   
   ## OUTLIER STATS
   ## Note: these are custom stats considered for the current problem; more are
@@ -484,32 +484,48 @@ get_stats <- function(dates, counts, k = 1, n_sim = 1000) {
   res <- fit_and_forecast(dates, counts, k = k, n_sim = n_sim)
 
   n <- length(dates)
-  res_resid <- numeric(n)
-  res_fringe <- numeric(n)
-  res_iqrd <- numeric(n)
+
+  stats <- list(
+    resid = numeric(n),
+    fringe = numeric(n),
+    iqrd = numeric(n),
+    mad = numeric(n)
+  )
 
   ## calculate the different statistics
   for (i in seq_len(n)) {
-    res_resid[i] <- get_resid(obs = res$obs$counts[i], sim = res$pred[[i]])
-    res_fringe[i] <- get_fringe(obs = res$obs$counts[i], sim = res$pred[[i]])
-    res_iqrd[i] <- get_iqrd(obs = res$obs$counts[i], sim = res$pred[[i]])
-    res_mad[i] <- get_mad(obs = res$obs$counts[i], sim = res$pred[[i]])
+    stats$resid[i] <- get_resid(obs = res$obs$counts[i], sim = res$pred[[i]])
+    stats$fringe[i] <- get_fringe(obs = res$obs$counts[i], sim = res$pred[[i]])
+    stats$iqrd[i] <- get_iqrd(obs = res$obs$counts[i], sim = res$pred[[i]])
+    stats$mad[i] <- get_mad(obs = res$obs$counts[i], sim = res$pred[[i]])
   }
 
 
   ## average metric (mean of other metrics after rescaling on 0-1)
   rescale <- function(x) (x - min(x, na.rm = TRUE)) / max(x, na.rm = TRUE)
 
-  res_combined <- (rescale(res_resid) +
-    rescale(res_fringe) +
-    rescale(res_iqrd)) / 3
+  stats$combined <- rowMeans(data.frame(stats))
+
+  ## define outliers a function of the median of each stat, so that x_i is an
+  ## outlier if (x_i > C * median)
+  n_fit <- n - k
+  days_fit <- seq_len(n_fit)
+  thresholds <- sapply(stats,
+                       function(e) median(e[days_fit], na.rm = TRUE)) * C
+  outliers <- lapply(seq_along(stats),
+                     function(i)
+                       stats[[i]] >= thresholds[i])
+  names(outliers) <- paste0("outlier_", names(stats))  
   
-  cbind.data.frame(dates = dates,
-                   counts = counts,
-                   resid = res_resid,
-                   fringe = res_fringe,
-                   iqrd = res_iqrd,
-                   combined = res_combined)
+  ## assemble results
+  stats <- data.frame(stats)
+  names(stats) <- paste0("stat_", names(stats))
+  out <- cbind.data.frame(dates = dates,
+                          counts = counts,
+                          stats,
+                          outliers)
+
+  out
 }
 
 
@@ -525,11 +541,22 @@ get_stats <- function(dates, counts, k = 1, n_sim = 1000) {
 ## stationary
 
 res_stationary <-  get_stats(sim$dates, sim$stationary)
-res_stationary_long <- res_stationary %>%
-  pivot_longer(-(1:2), names_to = "metric", values_to = "value")
+
+res_stationary_long_stats <- res_stationary %>%
+  select(1:2, contains("stat")) %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "stat") %>%
+  mutate(metric = gsub("stat_", "", metric))
+
+res_stationary_long_outliers <- res_stationary %>%
+  select(1:2, contains("outlier")) %>%
+  pivot_longer(-(1:2), names_to = "metric", values_to = "outlier") %>%
+  mutate(metric = gsub("outlier_", "", metric))
+
+res_stationary_long <- full_join(res_stationary_long_stats,
+                                 res_stationary_long_outliers)
 
 res_stationary_long %>%
-  ggplot(aes(x = dates, y = value, color = metric)) +
+  ggplot(aes(x = dates, y = stat, color = outlier)) +
   facet_wrap( ~ metric, scales = "free") +
   geom_vline(xintercept = 25, linetype = 2) +
   theme_bw() +
@@ -579,6 +606,11 @@ res_decrease_increase_long %>%
 
 
 ```{r AnomalyDetection}
+
+AnomalyDetectionVec(sim$stationary, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
+AnomalyDetectionVec(sim$stationary_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
+AnomalyDetectionVec(sim$decrease_increase, period = 7, plot = TRUE, direction = "both", max_anoms = 0.05)
+
 
 ```
 
