@@ -1,6 +1,6 @@
 ---
 title: "Early detection of changes in COVID-19 incidence using NHS pathways data"
-author: "Thibaut Jombart, Emily Nightingale, Quentin Leclerc, Sam Abbott, ... for CMMID"
+author: "Thibaut Jombart, Dirk Schumacher, Emily Nightingale, Quentin Leclerc, Sam Abbott, Michael Höhle, CMMID"
 date: "`r format(Sys.time(), '%A %d %B %Y')`"
 output:
   html_document:
@@ -65,6 +65,10 @@ library(remotes)
 library(janitor)
 library(kableExtra)
 library(DT)
+library(AnomalyDetection)
+library(surveillance)
+library(rsample)
+library(yardstick)
 
 ```
 
@@ -97,9 +101,9 @@ We import the latest NHS pathways data:
 
 ```{r load_data}
 
-x <- import_pathways() %>%
+pathways <- import_pathways() %>%
   as_tibble()
-x
+pathways
 
 ```
 
@@ -111,7 +115,7 @@ We extract the completion date from the NHS Pathways file timestamp:
 
 ```{r database_date}
 
-database_date <- attr(x, "timestamp")
+database_date <- attr(pathways, "timestamp")
 database_date
 
 ```
@@ -635,6 +639,210 @@ res_decrease_increase_long_stats %>%
 
 
 
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Model selection and outliers {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+This approach does the following:
+
+* splits the data into a training set ('older' data points) and an test set
+  containing the *k* most recent data points, for which we evaluate if they
+  represent trend shifts
+
+* fit a number of models to the training, evaluate each using cross-validation,
+  and retains the best-predicting model
+  
+* derive the x-th quantiles of the predictive distribution of the model
+
+* classify each point outside these quantiles as 'outliers'
+
+
+  
+
+## Implementation
+
+This code is largely contributed by Dirk Schumacher in his
+[dirky-hack](https://gist.github.com/dirkschumacher/dce2b83276a180375d24eb89b1334ef4). 
+
+In the absence of seasonality, the models retained include:
+
+* 
+
+
+
+```{r dirky-hack}
+
+.validate_data <- function(data, vars = c("count")) {
+  if (is.null(data)) stop("`data` is NULL")
+  if (!is.data.frame(data)) stop("`data` is not a `data.frame`")
+  if (!nrow(data)) stop("`data` has 0 rows")
+  for (e in vars) {
+    if (!e %in% names(data)) {
+      msg <- sprintf("missing column in `data`: %s", e)
+      stop(msg)
+    }
+  }
+}
+
+
+## poisson models
+model_poisson_constant <- function(data) {
+  .validate_data(data)
+  glm(data = data, formula = count ~ 1, family = "poisson")
+}
+
+model_poisson_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  glm(data = data, formula = count ~ 1 + day, family = "poisson")
+}
+
+model_poisson_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  glm(data = data, formula = cases ~ 1 + day + weekday, family = "poisson")
+}
+
+
+## neg-bin models
+model_nb_constant <- function(data) {
+  .validate_data(data)
+  MASS::glm.nb(data = data, formula = count ~ 1)
+}
+
+model_nb_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  MASS::glm.nb(data = data, formula = count ~ 1 + day)
+}
+
+model_nb_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  MASS::glm.nb(data = data, formula = cases ~ 1 + day + weekday)
+}
+
+
+## quasi-poisson models
+## neg-bin models
+model_qp_constant <- function(data) {
+  .validate_data(data)
+  glm(data = data, formula = count ~ 1, family = "quasipoisson")
+}
+
+model_qp_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  glm(data = data, formula = count ~ 1 + day, family = "quasipoisson")
+}
+
+model_qp_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  glm(data = data, formula = cases ~ 1 + day + weekday, family = "quasipoisson")
+}
+
+
+models <- list(
+  list(name = "poisson_constant", model = model_poisson_constant),
+  list(name = "poisson_time", model = model_poisson_time),
+#  list(name = "poisson_time_weekday", model = model_poisson_time_weekday)
+  list(name = "nb_constant", model = model_nb_constant),
+  list(name = "nb_time", model = model_nb_time)
+#  list(name = "nb_time_weekday", model = model_nb_time_weekday)
+#  list(name = "qp_constant", model = model_qp_constant),
+#  list(name = "qp_time", model = model_qp_time)
+#  list(name = "qp_time_weekday", model = model_qp_time_weekday)
+)
+
+
+
+select_model <- function(x, k = 1, models) {
+
+  ## split data training / test set
+  n <- nrow(x)
+  x_train <- head(x, n - k)
+  n_train <- nrow(x_train)
+  x_new <- tail(x, k)
+
+
+  ## auxiliary function to fit a model on training set and get RMSE on testing
+  ## set
+  get_rmse <- function(data, id_test, model) {
+    data_fit <- data[-id_test, ,drop = FALSE]
+    data_test <- data[id_test, ,drop = FALSE]
+    fitted_model <- model(data_fit)
+    predictions <- predict(fitted_model,
+                           newdata = data_test,
+                           type = "response")
+    sqrt(sum(data_test$count - predictions)^2)
+  }
+  
+
+  ## applies the function above for all jacknife samples and returns the median
+  ## of all RMSE
+  jack_rmse <- function(data, model) {
+    n <- nrow(data)
+    all_rmse <- vapply(seq_len(n),
+                       function(i) get_rmse(data, id_test = i, model = model$model),
+                       numeric(1))
+
+    median(all_rmse, na.rm = TRUE)
+  }
+
+
+  ## fit models and apply cross-validation current re-sampling uses Jackniffe;
+  ## see ?rsample::vfold_cv for more options
+
+  models_mrse_values <- vapply(models,
+                        function(model) jack_rmse(x_train, model),
+                        numeric(1))
+  models_names <- vapply(models,
+                         function(e) e$name,
+                         character(1))
+  models_results <- data.frame(models_names,
+                               models_mrse_values)
+
+  ## return best model
+  models[[which.min(models_mrse_values)]]
+
+}
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Farrington algorithm {.tabset .tabset-fade .tabset-pills}
+
+
+## Results
+
+It seems `sts` has not been designed with daily counts in mind; so far the
+following generates an error. Will get back to it later.
+
+```{r farrington, eval = FALSE}
+
+sim_sts <- sts(observed = sim$stationary, epoch = sim$dates, frequency = 365)
+farringtonFlexible(sim_stationary_sts) # generates an error
+
+
+```
+
+
+
+
 
 
 <!-- ======================================================== -->
@@ -653,7 +861,7 @@ AnomalyDetectionVec(sim$stationary, period = 7, plot = TRUE, direction = "both",
 
 
 
-## Results: stationary
+## Results: stationary + increase
 
 ```{r }
 
