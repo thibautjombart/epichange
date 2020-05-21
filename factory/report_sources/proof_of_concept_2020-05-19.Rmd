@@ -135,7 +135,7 @@ reported, used for modelling purposes; the first day is 0
 
 ```{r add_variables}
 
-x <- x %>% 
+pathways <- pathways %>% 
   mutate(nhs_region = str_to_title(gsub("_"," ",nhs_region)),
          nhs_region = gsub(" Of ", " of ", nhs_region),
          nhs_region = gsub(" And ", " and ", nhs_region),
@@ -670,11 +670,16 @@ This code is largely contributed by Dirk Schumacher in his
 
 In the absence of seasonality, the models retained include:
 
-* 
+* constant Poisson model
+* Poisson with day effect
+* Poisson with day and weekday effect
+* NegBin with day effect
+* NebBin with day and weekday effect
 
 
+Models:
 
-```{r dirky-hack}
+```{r models}
 
 .validate_data <- function(data, vars = c("count")) {
   if (is.null(data)) stop("`data` is NULL")
@@ -706,12 +711,7 @@ model_poisson_time_weekday <- function(data) {
 }
 
 
-## neg-bin models
-model_nb_constant <- function(data) {
-  .validate_data(data)
-  MASS::glm.nb(data = data, formula = count ~ 1)
-}
-
+## negative binomial models
 model_nb_time <- function(data) {
   .validate_data(data, c("count", "day"))
   MASS::glm.nb(data = data, formula = count ~ 1 + day)
@@ -724,12 +724,6 @@ model_nb_time_weekday <- function(data) {
 
 
 ## quasi-poisson models
-## neg-bin models
-model_qp_constant <- function(data) {
-  .validate_data(data)
-  glm(data = data, formula = count ~ 1, family = "quasipoisson")
-}
-
 model_qp_time <- function(data) {
   .validate_data(data, c("count", "day"))
   glm(data = data, formula = count ~ 1 + day, family = "quasipoisson")
@@ -741,59 +735,57 @@ model_qp_time_weekday <- function(data) {
 }
 
 
+## make a list of all models tested
 models <- list(
   list(name = "poisson_constant", model = model_poisson_constant),
   list(name = "poisson_time", model = model_poisson_time),
-#  list(name = "poisson_time_weekday", model = model_poisson_time_weekday)
-  list(name = "nb_constant", model = model_nb_constant),
+  # list(name = "poisson_time_weekday", model = model_poisson_time_weekday)
   list(name = "nb_time", model = model_nb_time)
-#  list(name = "nb_time_weekday", model = model_nb_time_weekday)
-#  list(name = "qp_constant", model = model_qp_constant),
-#  list(name = "qp_time", model = model_qp_time)
-#  list(name = "qp_time_weekday", model = model_qp_time_weekday)
+  # list(name = "nb_time_weekday", model = model_nb_time_weekday)
 )
 
+```
 
 
-select_model <- function(x, k = 1, models) {
+Functions to obtain RMSE for Jackniffed samples:
 
-  ## split data training / test set
-  n <- nrow(x)
-  x_train <- head(x, n - k)
-  n_train <- nrow(x_train)
-  x_new <- tail(x, k)
+```{r rmse_functions}
 
-
-  ## auxiliary function to fit a model on training set and get RMSE on testing
-  ## set
-  get_rmse <- function(data, id_test, model) {
-    data_fit <- data[-id_test, ,drop = FALSE]
-    data_test <- data[id_test, ,drop = FALSE]
-    fitted_model <- model(data_fit)
-    predictions <- predict(fitted_model,
-                           newdata = data_test,
-                           type = "response")
-    sqrt(sum(data_test$count - predictions)^2)
-  }
-  
-
-  ## applies the function above for all jacknife samples and returns the median
-  ## of all RMSE
-  jack_rmse <- function(data, model) {
-    n <- nrow(data)
-    all_rmse <- vapply(seq_len(n),
-                       function(i) get_rmse(data, id_test = i, model = model$model),
-                       numeric(1))
-
-    median(all_rmse, na.rm = TRUE)
-  }
+## auxiliary function to fit a model on training set and get RMSE on testing
+## set
+get_rmse <- function(data, id_test, model) {
+  data_fit <- data[-id_test, ,drop = FALSE]
+  data_test <- data[id_test, ,drop = FALSE]
+  fitted_model <- model(data_fit)
+  predictions <- predict(fitted_model,
+                         newdata = data_test,
+                         type = "response")
+  sqrt(sum(data_test$count - predictions)^2)
+}
 
 
-  ## fit models and apply cross-validation current re-sampling uses Jackniffe;
-  ## see ?rsample::vfold_cv for more options
+## applies the function above for all jacknife samples and returns the median
+## of all RMSE; see ?rsample::vfold_cv for more options
+
+jack_rmse <- function(data, model) {
+  n <- nrow(data)
+  all_rmse <- vapply(seq_len(n),
+                     function(i) get_rmse(data, id_test = i, model = model$model),
+                     numeric(1))
+
+  median(all_rmse, na.rm = TRUE)
+}
+
+```
+
+Functions to select 'best' model:
+
+```{r select_model}
+
+select_model <- function(x, models) {
 
   models_mrse_values <- vapply(models,
-                        function(model) jack_rmse(x_train, model),
+                        function(model) jack_rmse(x, model),
                         numeric(1))
   models_names <- vapply(models,
                          function(e) e$name,
@@ -803,17 +795,56 @@ select_model <- function(x, k = 1, models) {
 
   ## return best model
   models[[which.min(models_mrse_values)]]
-
 }
-
-
-
 
 
 ```
 
 
+Function to find outliers:
 
+```{r find_outliers}
+
+## Function to find outlier in supplementary observations
+find_outliers <- function(fitted_model, newdata, alpha = 0.05) {
+  pred_ci <- ciTools::add_ci(tb = newdata, fit = fitted_model,
+                             alpha = alpha, names = c("lower", "upper"))
+  dplyr::mutate(pred_ci,
+                outlier = count < lower | count > upper,
+                classif = case_when(
+                  count < lower ~ "decline",
+                  count > upper ~ "increase",
+                  TRUE ~ "normal"))
+}
+
+```
+
+
+General wrapper:
+
+```{r detect_epichange}
+
+detect_epichange <- function(x, models, day = 1, count = 2,
+                             k = 1, alpha = 0.05) {
+  
+  x <- data.frame(day = x[, day],
+                  count = x[, count])
+  
+  n <- nrow(x)
+  x_train <- head(x, n - k)
+  x_test <- tail(x, k)
+  
+  best_model <- select_model(x_train, models)
+  fit <- best_model$model(x_train)
+  diagnostics <- find_outliers(fitted_model = fit, x_test, alpha = alpha)
+
+  list(results = diagnostics,
+       all_models = models,
+       best_model = best_model,
+       model_fit = fit)
+}
+
+```
 
 
 
