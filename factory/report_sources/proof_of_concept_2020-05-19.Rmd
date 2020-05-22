@@ -351,6 +351,7 @@ simulate_data <- function(n_days = 30, change_at = 25, n_start = 300,
 
 ```{r simulated_data}
 
+set.seed(1)
 sim <- simulate_data()
 sim_long <- sim %>%
   pivot_longer(-1, names_to = "simulation", values_to = "cases")
@@ -856,7 +857,8 @@ plot.epichange <- function(x,
                            ...) {
 
   n_train <- nrow(x$results) - x$k
-
+  col_model <- "#BBB67E"
+  
   scale_classif <- scale_color_manual(
     "Change in trend:",
     values = c(decrease = col_decrease, increase = col_increase, normal = col_normal),
@@ -868,10 +870,10 @@ plot.epichange <- function(x,
     theme_bw() +
     large_txt +
     geom_vline(xintercept = n_train, linetype = 2) +
-    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = col_model) +
+    geom_line(aes(y = pred), color = col_model, alpha = 0.8) +
     geom_point(aes(color = classif), size = 3 + x$results$outlier) +
-    geom_line(alpha = 0.5) +
-    geom_line(aes(y = pred)) +
+    geom_line(alpha = 0.3) +
     scale_classif +
     theme(legend.position = "bottom") +
     guides(color = guide_legend(override.aes = list(size = c(4, 4, 3))))
@@ -881,25 +883,42 @@ plot.epichange <- function(x,
 
 
 
-## Results on simple simulations
 
+## Results: stationary
 
-```{r results_sim}
+```{r }
 
 res_stationary <- detect_epichange(sim, count = "stationary", models, k = 5, alpha = 0.05)
 res_stationary
 plot(res_stationary)
 
+```
+
+
+
+## Results: stationary + increase
+
+```{r }
 
 res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, k = 5, alpha = 0.05)
 res_stationary_increase
 plot(res_stationary_increase)
+
+```
+
+
+## Results: decrease + increase
+
+```{r }
 
 res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, k = 5, alpha = 0.05)
 res_decrease_increase
 plot(res_decrease_increase)
 
 ```
+
+
+
 
 
 
