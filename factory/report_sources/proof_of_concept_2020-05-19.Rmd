@@ -794,14 +794,16 @@ Function to find outliers:
 
 ## Function to find outlier in supplementary observations
 find_outliers <- function(fitted_model, newdata, alpha = 0.05) {
-  pred_ci <- ciTools::add_ci(tb = newdata, fit = fitted_model,
+  pred_ci <- ciTools::add_pi(tb = newdata, fit = fitted_model,
                              alpha = alpha, names = c("lower", "upper"))
   dplyr::mutate(pred_ci,
                 outlier = count < lower | count > upper,
                 classif = case_when(
                   count < lower ~ "decrease",
                   count > upper ~ "increase",
-                  TRUE ~ "normal"))
+                  TRUE ~ "normal"),
+                classif = factor(classif,
+                                 levels = c("increase", "normal", "decrease")))
 }
 
 ```
@@ -856,9 +858,10 @@ plot.epichange <- function(x,
   n_train <- nrow(x$results) - x$k
 
   scale_classif <- scale_color_manual(
-    "Change in trend",
+    "Change in trend:",
     values = c(decrease = col_decrease, increase = col_increase, normal = col_normal),
-    labels = c(decrease = "Decrease", increase = "Increase", normal = "Same trend"))
+    labels = c(decrease = "Decrease", increase = "Increase", normal = "Same trend"),
+    drop = FALSE)
 
   
   ggplot(x$results, aes(x = day, y = count)) +
@@ -883,9 +886,18 @@ plot.epichange <- function(x,
 
 ```{r results_sim}
 
-res_stationary <- detect_epichange(sim, models, k = 5, alpha = 0.05)
+res_stationary <- detect_epichange(sim, count = "stationary", models, k = 5, alpha = 0.05)
 res_stationary
 plot(res_stationary)
+
+
+res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, k = 5, alpha = 0.05)
+res_stationary_increase
+plot(res_stationary_increase)
+
+res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, k = 5, alpha = 0.05)
+res_decrease_increase
+plot(res_decrease_increase)
 
 ```
 
