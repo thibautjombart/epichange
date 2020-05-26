@@ -768,8 +768,13 @@ Functions to select 'best' model:
 
 ```{r select_model}
 
-select_model <- function(x, models) {
+#' @param x a `data.frame` containing data to be used in the models
+#' 
+#' @param models a `list` of models to be evaluated, each formulated as a
+#'   function taking a single `data` argument and returning an `lml` or `glm`
+#'   output
 
+select_model <- function(x, models) {
   models_mrse_values <- vapply(models,
                         function(model) jack_rmse(x, model),
                         numeric(1))
@@ -856,13 +861,26 @@ giving the highest number of outliers. For instance, if we code `o` outliers and
 
 ```{r detect_epichange}
 
-x <- sim
-count = "stationary_increase"
-max_k = 7
-alpha = 0.05
-
-
-
+#' @param x a `data.frame` containing data to be used in the models
+#' 
+#' @param models a `list` of models to be evaluated, each formulated as a
+#'   function taking a single `data` argument and returning an `lml` or `glm`
+#'   output
+#'
+#' @param day a single `integer` or `character` indicating the column containing
+#'   dates data; defaults the `1` (first column)
+#'
+#' @param count a single `integer` or `character` indicating the column containing
+#'   count data; defaults to `2` (second column)
+#'
+#' @param max_k an `integer` indicating the maximum number of recent days left
+#'   out of the trend estimation process
+#'
+#' @param alpha the type 1 error rate to be used for the outlier classification;
+#'   this corresponds to the expected proportion of data points following the
+#'   trend which will be mistakenly classified as outliers; defaults to `0.05`,
+#'   corresponding to 5 percent.
+#' 
 detect_epichange <- function(x, models, day = 1, count = 2,
                              max_k = 7, alpha = 0.05) {
 
