@@ -628,29 +628,30 @@ res_decrease_increase_long_stats %>%
 <!-- ======================================================== -->
 <!-- ======================================================== -->
 
-# Model selection and outliers {.tabset .tabset-fade .tabset-pills}
+# Automatic Selection of Models and Outliers Detection (ASMODE) {.tabset .tabset-fade .tabset-pills}
 
 ## Outline
 
 This approach does the following:
 
-* splits the data into a training set ('older' data points) and an test set
+1. splits the data into a training set ('older' data points) and an test set
   containing the *k* most recent data points, for which we evaluate if they
   represent trend shifts
 
-* fit a number of models to the training, evaluate each using cross-validation,
-  and retains the best-predicting model
-  
-* derive the x-th quantiles of the predictive distribution of the model
+2. fit a number of models to the training, 
 
-* classify each point outside these quantiles as 'outliers'
+3. evaluate each using cross-validation and retains the best-predicting model
+  
+4. derive the x-th quantiles of the predictive distribution of the model
+
+5. classify each point outside these quantiles as 'outliers'
 
 
   
 
 ## Implementation
 
-This code is largely contributed by Dirk Schumacher in his
+This is largely inspired by Dirk Schumacher's
 [dirky-hack](https://gist.github.com/dirkschumacher/dce2b83276a180375d24eb89b1334ef4). 
 
 In the absence of seasonality, the models retained include:
@@ -810,12 +811,12 @@ find_outliers <- function(fitted_model, newdata, alpha = 0.05) {
 ```
 
 
-General wrapper:
+General wrapper, fixed value of *k*:
 
-```{r detect_epichange}
+```{r detect_epichange_fixed_k}
 
-detect_epichange <- function(x, models, day = 1, count = 2,
-                             k = 1, alpha = 0.05) {
+detect_epichange_fixed_k <- function(x, models, day = 1, count = 2,
+                                     k = 1, alpha = 0.05) {
   
   x <- data.frame(day = x[, day],
                   count = x[, count])
@@ -844,6 +845,70 @@ detect_epichange <- function(x, models, day = 1, count = 2,
 }
 
 ```
+
+
+
+General wrapper, determines the value of *k* automatically, as the smallest *k*
+giving the highest number of outliers. For instance, if we code `o` outliers and
+`n` normal points, and observe series for the last 5 points:
+
+
+
+```{r detect_epichange}
+
+x <- sim
+count = "stationary_increase"
+max_k = 7
+alpha = 0.05
+
+
+
+detect_epichange <- function(x, models, day = 1, count = 2,
+                             max_k = 7, alpha = 0.05) {
+
+  k_values <- seq_len(max_k)
+
+  list_results <- lapply(k_values, function(k)
+    detect_epichange_fixed_k(x, models,
+                             day = day, count = count,
+                             k = k,
+                             alpha = alpha))
+
+  ## This function aims to find the 'best' `k`, using a score adding two
+  ## components:
+  ## 
+  ## 1. the least outliers in the first n-k points
+  ## 2. the most outliers in the last `k` points
+  ## 
+  ## In case of ties, we retain the solution with the most outliers in the last
+  ## `k` point (2nd score)
+  ##
+  ## @param res the value resturned by `detect_epichange_fixed_k`
+
+  score_k <- function(res) {
+    k <- res$k
+    res <- res$results
+    score_1 <- sum(!res$outlier & (res$type == "train"), na.rm = TRUE)
+    score_2 <- sum(res$outlier & (res$type == "test"), na.rm = TRUE)
+    c(k, score_1, score_2, score_1 + score_2)
+  }
+
+  ## Score each model, reorder by decrease total score and score_2, and get the
+  ## first hit
+  scores <- t(vapply(list_results, score_k, integer(4)))
+  colnames(scores) <- c("k", "score_1", "score_2", "score")
+  scores <- dplyr::arrange(as.data.frame(scores),
+                           dplyr::desc(score),
+                           dplyr::desc(score_2))
+  best_k <- scores$k[1]
+
+  ## Return the 'best' model
+  list_results[[best_k]]
+  
+}
+
+```
+
 
 
 Plotting method:
@@ -888,9 +953,10 @@ plot.epichange <- function(x,
 
 ```{r }
 
-res_stationary <- detect_epichange(sim, count = "stationary", models, k = 5, alpha = 0.05)
+res_stationary <- detect_epichange(sim, count = "stationary", models, alpha = 0.05)
 res_stationary
 plot(res_stationary)
+
 
 ```
 
@@ -900,7 +966,7 @@ plot(res_stationary)
 
 ```{r }
 
-res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, k = 5, alpha = 0.05)
+res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, alpha = 0.05)
 res_stationary_increase
 plot(res_stationary_increase)
 
@@ -911,7 +977,7 @@ plot(res_stationary_increase)
 
 ```{r }
 
-res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, k = 5, alpha = 0.05)
+res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, alpha = 0.05)
 res_decrease_increase
 plot(res_decrease_increase)
 
@@ -928,6 +994,14 @@ plot(res_decrease_increase)
 <!-- ======================================================== -->
 
 # Farrington algorithm {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+Farrington or the 'flexible' extension might be applicable here. One important
+caveats is that algorithm was developed for typically longer time series (weekly
+counts over several years), and needed to account for seasonality. We are in a
+case where we will have much shorter time series, and therefore probably need
+simpler models.
 
 
 ## Results
@@ -953,6 +1027,13 @@ farringtonFlexible(sim_stationary_sts) # generates an error
 <!-- ======================================================== -->
 
 # Using Seasonal Hybrid ESD {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+This algorithm has been developed by twitter to monitor its own traffic. It has
+been designed for large time series with strong seasonality components, so the
+method might not perform as well on our data.
+
 
 ## Results: stationary
 
@@ -982,17 +1063,6 @@ AnomalyDetectionVec(sim$decrease_increase, period = 7, plot = TRUE, direction = 
 
 ```
 
-
-
-## Other approaches
-
-* a nice overview of R packages for [changepoint analysis](https://lindeloev.github.io/mcp/articles/packages.html)
-
-* [GUI](https://blog.exploratory.io/introduction-to-anomaly-detection-in-r-with-exploratory-a0507d40385d)
-  for anomaly detection amongst other things
-
-* Package [AnomalyDetection](https://github.com/twitter/AnomalyDetection)
-  implementing the Seasonal Hybrid ESD (S-H-ESD) algorithm developed by twitter
 
 
 
