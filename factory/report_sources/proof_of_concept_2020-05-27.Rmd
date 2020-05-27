@@ -1,0 +1,735 @@
+---
+title: "Early detection of changes in COVID-19 incidence using NHS pathways data"
+author: "Thibaut Jombart, Dirk Schumacher, Emily Nightingale, Quentin Leclerc, Sam Abbott, Michael Höhle, CMMID"
+date: "`r format(Sys.time(), '%A %d %B %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    highlight: zenburn
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_collapse: no
+    toc_depth: 4
+    toc_float: yes
+    css: !expr here::here('css', 'style.css')
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      collapse = TRUE,
+                      dpi = 80,
+                      fig.height = 4,
+                      fig.width = 8,
+                      warning = FALSE,
+                      message = FALSE,
+                      dev = "png")
+```
+
+
+
+<!-- ======================================================= -->
+<!-- ======================================================= -->
+<!-- ======================================================= -->
+
+# Data preparation {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+
+* **Load scripts**: loads libraries and useful scripts used in the analyses; all
+`.R` files contained in `scripts` at the root of the factory are automatically
+loaded
+
+* **Load data**: imports datasets, and may contain some *ad hoc* changes to the
+data such as specific data cleaning (not used in other reports), new variables
+used in the analyses, etc.
+
+
+
+## Load packages
+
+```{r libraries}
+
+library(reportfactory)
+library(here)
+library(rio) 
+library(tidyverse)
+library(incidence)
+library(distcrete)
+library(epitrix)
+library(earlyR)
+library(projections)
+library(linelist)
+library(remotes)
+library(janitor)
+library(kableExtra)
+library(DT)
+library(AnomalyDetection)
+library(surveillance)
+library(rsample)
+library(yardstick)
+
+```
+
+
+
+## Load scripts
+
+These scripts will load:
+
+* all scripts stored as `.R` files inside `/scripts/`
+* all scripts stored as `.R` files inside `/src/`
+
+These scripts also contain routines to access the latest clean encrypted data
+(see next section). 
+
+```{r load_scripts}
+
+reportfactory::rfh_load_scripts()
+
+```
+
+
+
+
+
+## Load clean data
+
+We import the latest NHS pathways data:
+
+
+```{r load_data}
+
+pathways <- import_pathways() %>%
+  as_tibble()
+pathways
+
+```
+
+
+
+## Completion date
+
+We extract the completion date from the NHS Pathways file timestamp:
+
+```{r database_date}
+
+database_date <- attr(pathways, "timestamp")
+database_date
+
+```
+
+The **completion date** of the NHS Pathways data is
+**`r format(database_date, format = "%A %d %b %Y")`**.
+
+
+
+## Auxiliary functions
+
+These are functions which will be used further in the analyses.
+
+Function to estimate the generalised R-squared as the proportion of deviance
+explained by a given model:
+
+```{r Rsq}
+
+## Function to calculate R2 for Poisson model
+## not adjusted for model complexity but all models have the same DF here
+
+Rsq <- function(x) {
+  1 - (x$deviance / x$null.deviance)
+}
+
+```
+
+
+Function to classify the day of the week into *weekend*, *Monday*, and *the
+rest*; this is used in models having a *weekday* effect:
+
+```{r day_of_week}
+
+## Fn to add day of week
+day_of_week <- function(date) {
+  day_of_week <- weekdays(date)
+  out <- dplyr::case_when(
+    day_of_week %in% c("Saturday", "Sunday") ~ "weekend",
+    day_of_week %in% c("Monday") ~ "monday",
+    TRUE ~ "rest_of_week"
+  )
+  out <- factor(out, levels = c("rest_of_week", "monday", "weekend"))
+  out
+}
+
+```
+
+
+
+
+## Add variables
+
+We add the following variable:
+
+* `day`: an integer representing the number of days from the earliest data
+reported, used for modelling purposes; the first day is 0
+
+* `weekday`: a factor indicating which day of the week dates are: `weekend`,
+  `monday`, or `rest_of_week`
+
+```{r add_variables}
+
+pathways <- pathways %>% 
+  mutate(nhs_region = str_to_title(gsub("_"," ",nhs_region)),
+         nhs_region = gsub(" Of ", " of ", nhs_region),
+         nhs_region = gsub(" And ", " and ", nhs_region),
+         day = as.integer(date - min(date, na.rm = TRUE)),
+         weekday = day_of_week(date))
+
+```
+
+
+
+
+
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Simulated data {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+We simulate some case counts and study the behaviour of different approaches for
+detecting changes in underlying rates of case incidence.
+
+
+
+## Simulator
+
+We simulate the following datasets, all covering 30 days of data and using Poisson distributions:
+
+1. **stationary**: use a constant rate 50 cases / day
+2. **stationary+increase**: use a constant rate 50 for 25 days, followed by an
+   exponential increase (*r* = 0.2) from day 26 onwards
+3. **decrease+increase**: use an exponentially decreasing rate (*r* = -0.2) from
+   a start at 50 for 25 days, followed by an exponential increase (*r* = 0.2) from day 26
+   onwards
+
+```{r simulator}
+
+## Note: this is a quick and dirty simulator only used for a proof of concept
+
+#' @param n_days number of days to run simulations for
+#' @param change_at day at which to change (increase / decrease)
+#' @param n_start initial number of cases to start with
+#' @param r_increase daily growth rate for increase
+#' @param r_decrease daily growth rate for decrease
+
+simulate_data <- function(n_days = 30, change_at = 25, n_start = 300,
+                          r_increase = 0.1, r_decrease = -0.075) {
+  
+  dates <- seq_len(n_days)
+  n_days_change <- max(1L, n_days - change_at)
+  days_change <- seq_len(n_days_change)
+  
+  sim_stationary <- rpois(n = n_days, lambda = n_start)
+
+  sim_stationary_increase <- rpois(n = change_at, lambda = n_start)
+  lambda_increase <- tail(sim_stationary_increase, 1L) * exp(r_increase * days_change)
+  sim_stationary_increase <- c(sim_stationary_increase,
+                               rpois(n = n_days_change,
+                                     lambda = lambda_increase))
+
+  days_decrease <- seq_len(change_at) - 1
+  lambda_decrease <- n_start * exp(r_decrease * days_decrease)
+  sim_decrease_increase <- rpois(n = change_at, lambda = lambda_decrease)
+  lambda_increase <- tail(sim_decrease_increase, 1L) * exp(r_increase * days_change)
+  sim_decrease_increase <- c(sim_decrease_increase,
+                             rpois(n = n_days_change,
+                                   lambda = lambda_increase))
+  
+  data.frame(dates = dates,
+             stationary = sim_stationary,
+             stationary_increase = sim_stationary_increase,
+             decrease_increase = sim_decrease_increase)
+
+}
+
+
+```
+
+
+
+## Simulated data
+
+```{r simulated_data}
+
+set.seed(1)
+sim <- simulate_data()
+sim_long <- sim %>%
+  pivot_longer(-1, names_to = "simulation", values_to = "cases")
+
+ggplot(sim_long, aes(x = dates, y = cases, color = simulation)) +
+  geom_point() +
+  geom_line() +
+  scale_color_viridis_d(end = 0.8) +
+  theme_bw() +
+  large_txt +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 25, lty = 2) +
+  labs(title = "Simulated data")
+
+```
+
+
+
+
+
+
+
+
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Automatic Selection of Models and Outliers DEtection for Epidemics (ASMODEE) {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+This approach does the following:
+
+1. splits the data into a training set ('older' data points) and an test set
+  containing the *k* most recent data points, for which we evaluate if they
+  represent trend shifts
+
+2. fit a number of models to the training, 
+
+3. evaluate each using cross-validation and retains the best-predicting model
+  
+4. derive the x-th quantiles of the predictive distribution of the model
+
+5. classify each point outside these quantiles as 'outliers'
+
+
+  
+
+## Implementation
+
+This is largely inspired by Dirk Schumacher's
+[dirky-hack](https://gist.github.com/dirkschumacher/dce2b83276a180375d24eb89b1334ef4). 
+
+In the absence of seasonality, the models retained include:
+
+* constant Poisson model
+* Poisson with log-linear day effect
+* NegBin with log-linear day effect
+
+
+Models:
+
+```{r models}
+
+.validate_data <- function(data, vars = c("count")) {
+  if (is.null(data)) stop("`data` is NULL")
+  if (!is.data.frame(data)) stop("`data` is not a `data.frame`")
+  if (!nrow(data)) stop("`data` has 0 rows")
+  for (e in vars) {
+    if (!e %in% names(data)) {
+      msg <- sprintf("missing column in `data`: %s", e)
+      stop(msg)
+    }
+  }
+}
+
+
+## poisson models
+model_poisson_constant <- function(data) {
+  .validate_data(data)
+  glm(data = data, formula = count ~ 1, family = "poisson")
+}
+
+model_poisson_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  glm(data = data, formula = count ~ 1 + day, family = "poisson")
+}
+
+model_poisson_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  glm(data = data, formula = cases ~ 1 + day + weekday, family = "poisson")
+}
+
+
+## negative binomial models
+model_nb_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  MASS::glm.nb(data = data, formula = count ~ 1 + day)
+}
+
+model_nb_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  MASS::glm.nb(data = data, formula = cases ~ 1 + day + weekday)
+}
+
+
+## make a list of all models tested
+models <- list(
+  list(name = "poisson_constant", model = model_poisson_constant),
+  list(name = "poisson_time", model = model_poisson_time),
+  list(name = "nb_time", model = model_nb_time)
+)
+
+```
+
+
+Functions to obtain RMSE for Jackniffed samples:
+
+```{r rmse_functions}
+
+## auxiliary function to fit a model on training set and get RMSE on testing
+## set
+get_rmse <- function(data, id_test, model) {
+  data_fit <- data[-id_test, ,drop = FALSE]
+  data_test <- data[id_test, ,drop = FALSE]
+  fitted_model <- model(data_fit)
+  predictions <- predict(fitted_model,
+                         newdata = data_test,
+                         type = "response")
+  sqrt(sum(data_test$count - predictions)^2)
+}
+
+
+## applies the function above for all jacknife samples and returns the median
+## of all RMSE; see ?rsample::vfold_cv for more options
+
+jack_rmse <- function(data, model) {
+  n <- nrow(data)
+  all_rmse <- vapply(seq_len(n),
+                     function(i) get_rmse(data, id_test = i, model = model$model),
+                     numeric(1))
+
+  median(all_rmse, na.rm = TRUE)
+}
+
+```
+
+Functions to select 'best' model:
+
+```{r select_model}
+
+#' @param x a `data.frame` containing data to be used in the models
+#' 
+#' @param models a `list` of models to be evaluated, each formulated as a
+#'   function taking a single `data` argument and returning an `lml` or `glm`
+#'   output
+
+select_model <- function(x, models) {
+  models_mrse_values <- vapply(models,
+                        function(model) jack_rmse(x, model),
+                        numeric(1))
+  models_names <- vapply(models,
+                         function(e) e$name,
+                         character(1))
+  models_results <- data.frame(models_names,
+                               models_mrse_values)
+
+  ## return best model
+  out <- list(mrse = models_results,
+              model = models[[which.min(models_mrse_values)]])
+  out
+  
+}
+
+
+```
+
+
+Function to find outliers:
+
+```{r find_outliers}
+
+## Function to find outlier in supplementary observations
+find_outliers <- function(fitted_model, newdata, alpha = 0.05) {
+  pred_ci <- ciTools::add_pi(tb = newdata, fit = fitted_model,
+                             alpha = alpha, names = c("lower", "upper"))
+  dplyr::mutate(pred_ci,
+                outlier = count < lower | count > upper,
+                classif = case_when(
+                  count < lower ~ "decrease",
+                  count > upper ~ "increase",
+                  TRUE ~ "normal"),
+                classif = factor(classif,
+                                 levels = c("increase", "normal", "decrease")))
+}
+
+```
+
+
+General wrapper, fixed value of *k*:
+
+```{r detect_epichange_fixed_k}
+
+detect_epichange_fixed_k <- function(x, models, day = 1, count = 2,
+                                     k = 1, alpha = 0.05) {
+  
+  x <- data.frame(day = x[, day],
+                  count = x[, count])
+  
+  n <- nrow(x)
+  x_train <- head(x, n - k)
+  x_test <- tail(x, k)
+
+  models_comparison <- select_model(x_train, models)
+  best_model <- models_comparison$model
+  fit <- best_model$model(x_train)
+  diagnostics <- find_outliers(fitted_model = fit, x, alpha = alpha)
+
+  diagnostics <- mutate(diagnostics,
+                        type = dplyr::if_else(1:n() <= (n - k),
+                                              "train",
+                                              "test"))
+  out <- list(all_models = models,
+              models_mrse = models_comparison$mrse,
+              best_model = best_model,
+              model_fit = fit,
+              k = k,
+              results = diagnostics)
+  class(out) <- c("epichange", class(out))
+  out
+}
+
+```
+
+
+
+General wrapper, determines the value of *k* automatically, as the smallest *k*
+giving the highest number of outliers. For instance, if we code `o` outliers and
+`n` normal points, and observe series for the last 5 points:
+
+
+
+```{r detect_epichange}
+
+#' @param x a `data.frame` containing data to be used in the models
+#' 
+#' @param models a `list` of models to be evaluated, each formulated as a
+#'   function taking a single `data` argument and returning an `lml` or `glm`
+#'   output
+#'
+#' @param day a single `integer` or `character` indicating the column containing
+#'   dates data; defaults the `1` (first column)
+#'
+#' @param count a single `integer` or `character` indicating the column containing
+#'   count data; defaults to `2` (second column)
+#'
+#' @param max_k an `integer` indicating the maximum number of recent days left
+#'   out of the trend estimation process
+#'
+#' @param alpha the type 1 error rate to be used for the outlier classification;
+#'   this corresponds to the expected proportion of data points following the
+#'   trend which will be mistakenly classified as outliers; defaults to `0.05`,
+#'   corresponding to 5 percent.
+#' 
+detect_epichange <- function(x, models, day = 1, count = 2,
+                             max_k = 7, alpha = 0.05) {
+
+  k_values <- seq_len(max_k)
+
+  list_results <- lapply(k_values, function(k)
+    detect_epichange_fixed_k(x, models,
+                             day = day, count = count,
+                             k = k,
+                             alpha = alpha))
+
+  ## This function aims to find the 'best' `k`, using a score adding two
+  ## components:
+  ## 
+  ## 1. the least outliers in the first n-k points
+  ## 2. the most outliers in the last `k` points
+  ## 
+  ## In case of ties, we retain the solution with the most outliers in the last
+  ## `k` point (2nd score)
+  ##
+  ## @param res the value resturned by `detect_epichange_fixed_k`
+
+  score_k <- function(res) {
+    k <- res$k
+    res <- res$results
+    score_1 <- sum(!res$outlier & (res$type == "train"), na.rm = TRUE)
+    score_2 <- sum(res$outlier & (res$type == "test"), na.rm = TRUE)
+    c(k, score_1, score_2, score_1 + score_2)
+  }
+
+  ## Score each model, reorder by decrease total score and score_2, and get the
+  ## first hit
+  scores <- t(vapply(list_results, score_k, integer(4)))
+  colnames(scores) <- c("k", "score_1", "score_2", "score")
+  scores <- dplyr::arrange(as.data.frame(scores),
+                           dplyr::desc(score),
+                           dplyr::desc(score_2))
+  best_k <- scores$k[1]
+
+  ## Return the 'best' model
+  list_results[[best_k]]
+  
+}
+
+```
+
+
+
+Plotting method:
+
+```{r plot.epichange}
+
+plot.epichange <- function(x,
+                           col_normal = "#8B8B8C",
+                           col_increase = "#CB3355",
+                           col_decrease = "#32AB96",
+                           ...) {
+
+  n_train <- nrow(x$results) - x$k
+  col_model <- "#BBB67E"
+  
+  scale_classif <- scale_color_manual(
+    "Change in trend:",
+    values = c(decrease = col_decrease, increase = col_increase, normal = col_normal),
+    labels = c(decrease = "Decrease", increase = "Increase", normal = "Same trend"),
+    drop = FALSE)
+
+  
+  ggplot(x$results, aes(x = day, y = count)) +
+    theme_bw() +
+    large_txt +
+    geom_vline(xintercept = n_train, linetype = 2) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = col_model) +
+    geom_line(aes(y = pred), color = col_model, alpha = 0.8) +
+    geom_point(aes(color = classif), size = 3 + x$results$outlier) +
+    geom_line(alpha = 0.3) +
+    scale_classif +
+    theme(legend.position = "bottom") +
+    guides(color = guide_legend(override.aes = list(size = c(4, 4, 3))))
+}
+
+```
+
+
+
+
+## Results: stationary
+
+```{r }
+
+res_stationary <- detect_epichange(sim, count = "stationary", models, alpha = 0.05)
+res_stationary
+plot(res_stationary)
+
+
+```
+
+
+
+## Results: stationary + increase
+
+```{r }
+
+res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, alpha = 0.05)
+res_stationary_increase
+plot(res_stationary_increase)
+
+```
+
+
+## Results: decrease + increase
+
+```{r }
+
+res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, alpha = 0.05)
+res_decrease_increase
+plot(res_decrease_increase)
+
+```
+
+
+
+
+
+
+
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+<!-- ======================================================== -->
+
+# Application to NHS pathways data {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+We apply ASMODEE to the NHS pathways data, using all data in first instance
+(111/999 calls and 111-online).
+
+
+## Models considered
+
+The following models are considered in ASMODEE:
+
+* Poisson GLM constant rate
+* Poisson GLM linear with time
+* Poisson GLM linear with time with weekday effect (WE / Monday / other days)
+* Negative Binomial GLM log-linear with time
+* Negative Binomial GLM log-linear with time with weekday effect (WE / Monday / other days)
+
+```{r nhs_models}
+
+## make a list of all models tested
+nhs_models <- list(
+  list(name = "poisson_constant", model = model_poisson_constant),
+  list(name = "poisson_time", model = model_poisson_time),
+  list(name = "poisson_time_weekday", model = model_poisson_time_weekday),
+  list(name = "nb_time", model = model_nb_time),
+  list(name = "nb_time_weekday", model = model_nb_time_weekday)
+)
+
+```
+
+
+## Results by NHS region
+
+
+
+
+
+<!-- =======================================================  -->
+<!-- =======================================================  -->
+<!-- ======================================================= -->
+
+# System information {.tabset .tabset-fade .tabset-pills}
+
+## Outline
+
+The following information documents the system on which the document was
+compiled.
+
+
+## System 
+
+This provides information on the operating system.
+
+```{r system_info}
+Sys.info()
+```
+
+## R environment
+
+This provides information on the version of R used:
+
+```{r R_session}
+R.version
+```
+
+
+## R packages
+
+This provides information on the packages used:
+
+```{r R_pkg}
+sessionInfo()
+```
