@@ -189,6 +189,20 @@ pathways <- pathways %>%
 
 
 
+## Filter data
+
+We create the following subsets of the data:
+
+* `pathways_recent`: NHS pathways data over the last 4 weeks; note that we need
+  to redifine relative days as the timescale has changed
+
+```{r }
+
+first_date <- database_date - 28
+pathways_recent <- pathways %>%
+  filter(date >= first_date)
+
+```
 
 
 <!-- ======================================================== -->
@@ -206,14 +220,15 @@ detecting changes in underlying rates of case incidence.
 
 ## Simulator
 
-We simulate the following datasets, all covering 30 days of data and using Poisson distributions:
+We simulate the following datasets, all covering 30 days of data and using
+Poisson distributions:
 
 1. **stationary**: use a constant rate 50 cases / day
 2. **stationary+increase**: use a constant rate 50 for 25 days, followed by an
    exponential increase (*r* = 0.2) from day 26 onwards
 3. **decrease+increase**: use an exponentially decreasing rate (*r* = -0.2) from
-   a start at 50 for 25 days, followed by an exponential increase (*r* = 0.2) from day 26
-   onwards
+   a start at 50 for 25 days, followed by an exponential increase (*r* = 0.2)
+   from day 26 onwards
 
 ```{r simulator}
 
@@ -355,7 +370,7 @@ model_poisson_time <- function(data) {
 
 model_poisson_time_weekday <- function(data) {
   .validate_data(data, c("count", "day", "weekday"))
-  glm(data = data, formula = cases ~ 1 + day + weekday, family = "poisson")
+  glm(data = data, formula = count ~ 1 + day + weekday, family = "poisson")
 }
 
 
@@ -367,7 +382,7 @@ model_nb_time <- function(data) {
 
 model_nb_time_weekday <- function(data) {
   .validate_data(data, c("count", "day", "weekday"))
-  MASS::glm.nb(data = data, formula = cases ~ 1 + day + weekday)
+  MASS::glm.nb(data = data, formula = count ~ 1 + day + weekday)
 }
 
 
@@ -464,16 +479,36 @@ find_outliers <- function(fitted_model, newdata, alpha = 0.05) {
 ```
 
 
+
 General wrapper, fixed value of *k*:
 
 ```{r detect_epichange_fixed_k}
 
-detect_epichange_fixed_k <- function(x, models, day = 1, count = 2,
-                                     k = 1, alpha = 0.05) {
-  
-  x <- data.frame(day = x[, day],
-                  count = x[, count])
-  
+#' Detect trend and outliers for a fixed value of `k`
+#'
+#' @param x a `data.frame` with all data needed for the models specified in `models`
+#'
+#' @param models a `list` of models, each component being a named list
+#'   containing: `name` as a single `character` string and `model` as a function
+#'   with single argument `data`, which return an instance of `lm` or `glm`
+#'
+#' @param k the number of most recent data points left out of the model fitting
+#'   procedure
+#'
+#' @param alpha the type 1 error rate to be used for the outlier classification;
+#'   this corresponds to the expected proportion of data points following the
+#'   trend which will be mistakenly classified as outliers; defaults to `0.05`,
+#'   corresponding to 5 percent.
+#'
+#' @param ... a series of named arguments indicating the variables to be used in
+#'   the model e.g. `foo = bar` where `foo` is a variable defined in the
+#'   models formulas and `bar` is the name the matching column in the dataset;
+#'   `character` and `integer` are acceptable to indicate columns
+
+detect_epichange_fixed_k <- function(x, models, k = 1, alpha = 0.05, ...) {
+
+  x <- dplyr::select(x, ..., everything())
+
   n <- nrow(x)
   x_train <- head(x, n - k)
   x_test <- tail(x, k)
@@ -515,12 +550,6 @@ giving the highest number of outliers. For instance, if we code `o` outliers and
 #'   function taking a single `data` argument and returning an `lml` or `glm`
 #'   output
 #'
-#' @param day a single `integer` or `character` indicating the column containing
-#'   dates data; defaults the `1` (first column)
-#'
-#' @param count a single `integer` or `character` indicating the column containing
-#'   count data; defaults to `2` (second column)
-#'
 #' @param max_k an `integer` indicating the maximum number of recent days left
 #'   out of the trend estimation process
 #'
@@ -528,15 +557,20 @@ giving the highest number of outliers. For instance, if we code `o` outliers and
 #'   this corresponds to the expected proportion of data points following the
 #'   trend which will be mistakenly classified as outliers; defaults to `0.05`,
 #'   corresponding to 5 percent.
+#'
+#' @param ... a series of named arguments indicating the variables to be used in
+#'   the model e.g. `foo = bar` where `foo` is a variable defined in the
+#'   models formulas and `bar` is the name the matching column in the dataset;
+#'   `character` and `integer` are acceptable to indicate columns
 #' 
-detect_epichange <- function(x, models, day = 1, count = 2,
-                             max_k = 7, alpha = 0.05) {
+detect_epichange <- function(x, models, max_k = 7, alpha = 0.05, ...) {
 
+  x <- dplyr::select(x, ..., everything())
+  
   k_values <- seq_len(max_k)
 
   list_results <- lapply(k_values, function(k)
     detect_epichange_fixed_k(x, models,
-                             day = day, count = count,
                              k = k,
                              alpha = alpha))
 
@@ -581,13 +615,14 @@ Plotting method:
 
 ```{r plot.epichange}
 
-plot.epichange <- function(x,
+plot.epichange <- function(x, point_size = 2,
                            col_normal = "#8B8B8C",
                            col_increase = "#CB3355",
                            col_decrease = "#32AB96",
+                           guide = TRUE,
                            ...) {
 
-  n_train <- nrow(x$results) - x$k
+  stop_train <- max(x$results$day) - x$k
   col_model <- "#BBB67E"
   
   scale_classif <- scale_color_manual(
@@ -596,18 +631,19 @@ plot.epichange <- function(x,
     labels = c(decrease = "Decrease", increase = "Increase", normal = "Same trend"),
     drop = FALSE)
 
+  custom_guide <- if (guide) guide_legend(override.aes = list(size = c(4, 4, 3))) else FALSE
   
   ggplot(x$results, aes(x = day, y = count)) +
     theme_bw() +
     large_txt +
-    geom_vline(xintercept = n_train, linetype = 2) +
+    geom_vline(xintercept = stop_train, linetype = 2) +
     geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = col_model) +
     geom_line(aes(y = pred), color = col_model, alpha = 0.8) +
-    geom_point(aes(color = classif), size = 3 + x$results$outlier) +
+    geom_point(aes(color = classif), size = point_size + x$results$outlier) +
     geom_line(alpha = 0.3) +
     scale_classif +
     theme(legend.position = "bottom") +
-    guides(color = guide_legend(override.aes = list(size = c(4, 4, 3))))
+    guides(color = custom_guide)
 }
 
 ```
@@ -619,10 +655,10 @@ plot.epichange <- function(x,
 
 ```{r }
 
-res_stationary <- detect_epichange(sim, count = "stationary", models, alpha = 0.05)
+res_stationary <- detect_epichange(sim, models, alpha = 0.05,
+                                   day = dates, count = stationary)
 res_stationary
 plot(res_stationary)
-
 
 ```
 
@@ -632,7 +668,8 @@ plot(res_stationary)
 
 ```{r }
 
-res_stationary_increase <- detect_epichange(sim, count = "stationary_increase", models, alpha = 0.05)
+res_stationary_increase <- detect_epichange(sim, models, alpha = 0.05,
+                                            day = dates, count = "stationary_increase")
 res_stationary_increase
 plot(res_stationary_increase)
 
@@ -643,7 +680,8 @@ plot(res_stationary_increase)
 
 ```{r }
 
-res_decrease_increase <- detect_epichange(sim, count = "decrease_increase", models, alpha = 0.05)
+res_decrease_increase <- detect_epichange(sim, models, alpha = 0.05,
+                                          day = dates, count = "decrease_increase")
 res_decrease_increase
 plot(res_decrease_increase)
 
@@ -682,8 +720,8 @@ The following models are considered in ASMODEE:
 ## make a list of all models tested
 nhs_models <- list(
   list(name = "poisson_constant", model = model_poisson_constant),
-  list(name = "poisson_time", model = model_poisson_time),
-  list(name = "poisson_time_weekday", model = model_poisson_time_weekday),
+  #list(name = "poisson_time", model = model_poisson_time),
+  #list(name = "poisson_time_weekday", model = model_poisson_time_weekday),
   list(name = "nb_time", model = model_nb_time),
   list(name = "nb_time_weekday", model = model_nb_time_weekday)
 )
@@ -691,7 +729,52 @@ nhs_models <- list(
 ```
 
 
-## Results by NHS region
+## Overall results
+
+
+```{r res_overall}
+
+counts_overall <- pathways_recent %>%
+  group_by(date, day, weekday) %>%
+  summarise(n = sum(count))
+
+res_overall <- detect_epichange(counts_overall, nhs_models, alpha = 0.05,
+                                count = "n")
+res_overall
+plot(res_overall, point_size = 3) +
+  labs(title = "ASMODEE on NHS pathways data",
+       subtitle = "(last 4 weeks, including 111/999 calls and 111 online)")
+
+```
+
+
+
+## Results by NHS region  {.tabset .tabset-fade .tabset-pills}
+
+```{r res_nhs_region, fig.height = 8}
+
+counts_nhs_region <- pathways_recent %>%
+  group_by(nhs_region, date, day, weekday) %>%
+  summarise(n = sum(count)) %>%
+  split(.$nhs_region)
+
+res_nhs_region <- lapply(counts_nhs_region,
+                         detect_epichange,
+                         nhs_models,
+                         alpha = 0.05,
+                         count = "n")
+
+plots_nhs_region <- lapply(seq_along(res_nhs_region),
+                           function(i)
+                             plot(res_nhs_region[[i]], point_size = 1, guide = FALSE) +
+                               labs(subtitle = names(res_nhs_region)[i]))
+cowplot::plot_grid(plotlist = plots_nhs_region)
+
+```
+
+
+
+
 
 
 
