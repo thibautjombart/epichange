@@ -1,6 +1,6 @@
 ---
 title: "Early detection of changes in COVID-19 incidence using NHS pathways data"
-author: "Thibaut Jombart, Dirk Schumacher, Emily Nightingale, Quentin Leclerc, Sam Abbott, Michael Höhle, CMMID"
+author: "Thibaut Jombart, Dirk Schumacher, Quentin Leclerc, Emily Nightingale, Sam Abbott, Stéphane Ghozzi, Stefan Flasche, Mark Jit, Andre Charlett, Michael Höhle, John Edmunds, CMMID"
 date: "`r format(Sys.time(), '%A %d %B %Y')`"
 output:
   html_document:
@@ -522,11 +522,20 @@ detect_epichange_fixed_k <- function(x, models, k = 1, alpha = 0.05, ...) {
                         type = dplyr::if_else(1:n() <= (n - k),
                                               "train",
                                               "test"))
+  ## probability of having at least this number of outliers (or more)
+  n_outliers <- sum(diagnostics$outlier)
+  p_value <- pbinom(n_outliers,
+                    size = nrow(diagnostics),
+                    prob = 0.05,
+                    lower.tail = FALSE)
+
   out <- list(all_models = models,
               models_mrse = models_comparison$mrse,
+              k = k,
               best_model = best_model,
               model_fit = fit,
-              k = k,
+              n_outliers = n_outliers,
+              p_value = p_value,
               results = diagnostics)
   class(out) <- c("epichange", class(out))
   out
@@ -637,8 +646,8 @@ plot.epichange <- function(x, point_size = 2,
     theme_bw() +
     large_txt +
     geom_vline(xintercept = stop_train, linetype = 2) +
-    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = col_model) +
-    geom_line(aes(y = pred), color = col_model, alpha = 0.8) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.4, fill = col_model) +
+    #geom_line(aes(y = pred), color = col_model, alpha = 0.8) +
     geom_point(aes(color = classif), size = point_size + x$results$outlier) +
     geom_line(alpha = 0.3) +
     scale_classif +
@@ -751,7 +760,7 @@ plot(res_overall, point_size = 3) +
 
 ## Results by NHS region  {.tabset .tabset-fade .tabset-pills}
 
-```{r res_nhs_region, fig.height = 8}
+```{r res_nhs_region, fig.height = 8, fig.width = 10}
 
 counts_nhs_region <- pathways_recent %>%
   group_by(nhs_region, date, day, weekday) %>%
@@ -769,6 +778,48 @@ plots_nhs_region <- lapply(seq_along(res_nhs_region),
                              plot(res_nhs_region[[i]], point_size = 1, guide = FALSE) +
                                labs(subtitle = names(res_nhs_region)[i]))
 cowplot::plot_grid(plotlist = plots_nhs_region)
+
+```
+
+
+
+
+## Results by CCG  {.tabset .tabset-fade .tabset-pills}
+
+For computational reasons, we only do the analyses on the first 12 CCG. 
+
+```{r res_ccg, fig.height = 8, fig.width = 10}
+
+counts_ccg <- pathways_recent %>%
+  group_by(ccg_name, date, day, weekday) %>%
+  summarise(n = sum(count)) %>%
+  complete(date, fill = list(count = 0)) %>% 
+  split(.$ccg_name)
+
+## only first 12 CCG
+res_ccg <- lapply(counts_ccg[1:12],
+                  detect_epichange,
+                  nhs_models,
+                  alpha = 0.05,
+                  count = "n")
+
+## isolate p-values and output table
+p_values <- sapply(res_ccg, function(e) e$p_value) %>%
+  stack() %>%
+  select(ccg_name = ind, p_value = values) %>%
+  arrange(p_value)
+
+p_values %>%
+  mutate(p_value = format(p_values$p_value, scientific = TRUE, digits = 2)) %>%           
+  dt_tab()
+
+## plots
+plots_ccg <- lapply(seq_along(res_ccg),
+                           function(i)
+                             plot(res_ccg[[i]], point_size = 1, guide = FALSE) +
+                               labs(title = names(res_ccg)[i]) +
+                               theme(plot.title = element_text(size = 11)))
+cowplot::plot_grid(plotlist = plots_ccg)
 
 ```
 
