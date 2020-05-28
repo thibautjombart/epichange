@@ -374,6 +374,20 @@ model_poisson_time_weekday <- function(data) {
 }
 
 
+
+## quasi-Poisson
+model_quasipoisson_time <- function(data) {
+  .validate_data(data, c("count", "day"))
+  glm(data = data, formula = count ~ 1 + day, family = "quasipoisson")
+}
+
+model_quasipoisson_time_weekday <- function(data) {
+  .validate_data(data, c("count", "day", "weekday"))
+  glm(data = data, formula = count ~ 1 + day + weekday, family = "quasipoisson")
+}
+
+
+
 ## negative binomial models
 model_nb_time <- function(data) {
   .validate_data(data, c("count", "day"))
@@ -425,6 +439,14 @@ jack_rmse <- function(data, model) {
   median(all_rmse, na.rm = TRUE)
 }
 
+
+#' Wrapper around AIC for data / model pair
+#'
+get_aic <- function(data, model) {
+  stats::AIC(model$model(data))
+}
+  
+
 ```
 
 Functions to select 'best' model:
@@ -434,24 +456,44 @@ Functions to select 'best' model:
 #' @param x a `data.frame` containing data to be used in the models
 #' 
 #' @param models a `list` of models to be evaluated, each formulated as a
-#'   function taking a single `data` argument and returning an `lml` or `glm`
+#'   function taking a single `data` argument and returning an `lm` or `glm`
 #'   output
+#'
+#' @method a single `character` string indicating the method to use for model
+#'   selection; `"jack_rmse"` (default) uses Jackniffe and the Mean Root Square
+#'   Error (RMSE) of the data points left out, selecting the model with the
+#'   smallest RMSE; `"aic"` uses Akaike's Information Criteria (AIC), retaining
+#'   the model with lower AIC; we recommend using the default for accuracy, and
+#'   the second for computational efficiency
+#' 
 
-select_model <- function(x, models) {
-  models_mrse_values <- vapply(models,
-                        function(model) jack_rmse(x, model),
-                        numeric(1))
+select_model <- function(x, models, method = "jack_rmse") {
+  ## note: weird, match.arg(method) no longer seems to work here
+  method <- match.arg(method, c("jack_rmse", "aic"))
+  
+  if (method == "jack_rmse") {
+    measure_fit <- jack_rmse
+    stat_name <- "RMSE"
+  }
+  if (method == "aic") {
+    measure_fit <- get_aic
+    stat_name <- "AIC"
+  }
+  
+  models_fit_values <- vapply(models,
+                              function(model) measure_fit(x, model),
+                              numeric(1))
   models_names <- vapply(models,
                          function(e) e$name,
                          character(1))
   models_results <- data.frame(models_names,
-                               models_mrse_values)
+                               models_fit_values)
+  names(models_results) <- c("model", stat_name)
 
   ## return best model
-  out <- list(mrse = models_results,
-              model = models[[which.min(models_mrse_values)]])
-  out
-  
+  out <- list(fit = models_results,
+              model = models[[which.min(models_fit_values)]])
+  out  
 }
 
 
@@ -505,18 +547,23 @@ General wrapper, fixed value of *k*:
 #'   models formulas and `bar` is the name the matching column in the dataset;
 #'   `character` and `integer` are acceptable to indicate columns
 
-detect_epichange_fixed_k <- function(x, models, k = 1, alpha = 0.05, ...) {
+detect_epichange_fixed_k <- function(x, models, k = 1, alpha = 0.05,
+                                     method = c("jack_rmse", "aic"),
+                                     ...) {
 
   x <- dplyr::select(x, ..., everything())
-
+  method <- match.arg(method)
+  
   n <- nrow(x)
   x_train <- head(x, n - k)
   x_test <- tail(x, k)
 
-  models_comparison <- select_model(x_train, models)
+  models_comparison <- select_model(x_train, models, method)
   best_model <- models_comparison$model
-  fit <- best_model$model(x_train)
-  diagnostics <- find_outliers(fitted_model = fit, x, alpha = alpha)
+  best_model_fitted <- best_model$model(x_train)
+  diagnostics <- find_outliers(fitted_model =  best_model_fitted,
+                               newdata = x,
+                               alpha = alpha)
 
   diagnostics <- mutate(diagnostics,
                         type = dplyr::if_else(1:n() <= (n - k),
@@ -530,10 +577,10 @@ detect_epichange_fixed_k <- function(x, models, k = 1, alpha = 0.05, ...) {
                     lower.tail = FALSE)
 
   out <- list(all_models = models,
-              models_mrse = models_comparison$mrse,
+              models_fit = models_comparison$fit,
               k = k,
               best_model = best_model,
-              model_fit = fit,
+              best_model_fitted = best_model_fitted,
               n_outliers = n_outliers,
               p_value = p_value,
               results = diagnostics)
@@ -572,14 +619,19 @@ giving the highest number of outliers. For instance, if we code `o` outliers and
 #'   models formulas and `bar` is the name the matching column in the dataset;
 #'   `character` and `integer` are acceptable to indicate columns
 #' 
-detect_epichange <- function(x, models, max_k = 7, alpha = 0.05, ...) {
+detect_epichange <- function(x, models, max_k = 7, alpha = 0.05,
+                             method = c("jack_rmse", "aic"),
+                             ...) {
 
   x <- dplyr::select(x, ..., everything())
+  method <- match.arg(method)
   
   k_values <- seq_len(max_k)
 
   list_results <- lapply(k_values, function(k)
-    detect_epichange_fixed_k(x, models,
+    detect_epichange_fixed_k(x,
+                             models = models,
+                             method = method,
                              k = k,
                              alpha = alpha))
 
@@ -729,8 +781,8 @@ The following models are considered in ASMODEE:
 ## make a list of all models tested
 nhs_models <- list(
   list(name = "poisson_constant", model = model_poisson_constant),
-  #list(name = "poisson_time", model = model_poisson_time),
-  #list(name = "poisson_time_weekday", model = model_poisson_time_weekday),
+  list(name = "quasipoisson_time", model = model_quasipoisson_time),
+  list(name = "quasipoisson_time_weekday", model = model_quasipoisson_time_weekday)
   list(name = "nb_time", model = model_nb_time),
   list(name = "nb_time_weekday", model = model_nb_time_weekday)
 )
@@ -770,6 +822,7 @@ counts_nhs_region <- pathways_recent %>%
 res_nhs_region <- lapply(counts_nhs_region,
                          detect_epichange,
                          nhs_models,
+                         method = "aic",
                          alpha = 0.05,
                          count = "n")
 
@@ -797,11 +850,12 @@ counts_ccg <- pathways_recent %>%
   split(.$ccg_name)
 
 ## only first 12 CCG
-res_ccg <- lapply(counts_ccg[1:12],
+system.time(res_ccg <- lapply(counts_ccg[1:12],
                   detect_epichange,
                   nhs_models,
+                  method = "aic",
                   alpha = 0.05,
-                  count = "n")
+                  count = "n"))
 
 ## isolate p-values and output table
 p_values <- sapply(res_ccg, function(e) e$p_value) %>%
